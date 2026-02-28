@@ -41,7 +41,13 @@ TOP_N_RECOMMENDATIONS = 10
 def build_engine():
     password = quote_plus(DB_PASSWORD)  # safely encodes @ and special chars
     url = f"mysql+pymysql://{DB_USER}:{password}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
-    return create_engine(url, pool_pre_ping=True)
+    return create_engine(
+        url, 
+        pool_pre_ping=True,
+        pool_size=10,
+        max_overflow=20,
+        pool_recycle=3600
+    )
 
 
 # ── Step 1: Load Ratings ───────────────────────────────────────────────────────
