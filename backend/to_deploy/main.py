@@ -41,62 +41,64 @@ MODELS_DIR = "models"
 
 # ── App State (loaded once at startup) ───────────────────────────────────────
 
+# ── App State (loaded on demand) ───────────────────────────────────────────
+
 class AppState:
     engine        = None
-    matrix        = None
-    sim_matrix    = None
-    product_df    = None
-    tfidf_matrix  = None
-    product_index = None
+    _matrix       = None
+    _sim_matrix   = None
+    _product_df   = None
+    _tfidf_matrix = None
+    _product_index = None
 
 state = AppState()
 
 
-# ── Model Helpers ─────────────────────────────────────────────────────────────
+# ── Lazy Loading ─────────────────────────────────────────────────────────────
 
-def models_exist() -> bool:
-    """Check if all saved model files are present on disk."""
-    files = [
-        "cf_matrix.pkl", "cf_sim_matrix.pkl",
-        "product_df.pkl", "tfidf_matrix.pkl",
-        "product_index.pkl", "vectorizer.pkl"
-    ]
-    return all(os.path.exists(f"{MODELS_DIR}/{f}") for f in files)
+def get_matrix():
+    if state._matrix is None:
+        logger.info("📂 Lazy-loading CF matrix ...")
+        with open(f"{MODELS_DIR}/cf_matrix.pkl", "rb") as f:
+            state._matrix = pickle.load(f)
+    return state._matrix
+
+def get_sim_matrix():
+    if state._sim_matrix is None:
+        logger.info("📂 Lazy-loading CF sim matrix ...")
+        with open(f"{MODELS_DIR}/cf_sim_matrix.pkl", "rb") as f:
+            state._sim_matrix = pickle.load(f)
+    return state._sim_matrix
+
+def get_product_df():
+    if state._product_df is None:
+        logger.info("📂 Lazy-loading product DF ...")
+        with open(f"{MODELS_DIR}/product_df.pkl", "rb") as f:
+            state._product_df = pickle.load(f)
+    return state._product_df
+
+def get_tfidf_matrix():
+    if state._tfidf_matrix is None:
+        logger.info("📂 Lazy-loading TF-IDF matrix ...")
+        with open(f"{MODELS_DIR}/tfidf_matrix.pkl", "rb") as f:
+            state._tfidf_matrix = pickle.load(f)
+    return state._tfidf_matrix
+
+def get_product_index():
+    if state._product_index is None:
+        logger.info("📂 Lazy-loading product index ...")
+        with open(f"{MODELS_DIR}/product_index.pkl", "rb") as f:
+            state._product_index = pickle.load(f)
+    return state._product_index
 
 
-# ── Lifespan: Load Models at Startup ─────────────────────────────────────────
+# ── Lifespan ─────────────────────────────────────────────────────────────
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info("🚀 Starting up ...")
-
+    logger.info("🚀 Starting up — Engine only (Lazy Loading enabled)")
     state.engine = build_engine()
-
-    if models_exist():
-        # ── Fast path: load from disk (seconds) ──────────────────────────────
-        logger.info("📂 Loading models from disk ...")
-
-        with open(f"{MODELS_DIR}/cf_matrix.pkl",     "rb") as f: state.matrix        = pickle.load(f)
-        with open(f"{MODELS_DIR}/cf_sim_matrix.pkl", "rb") as f: state.sim_matrix    = pickle.load(f)
-        with open(f"{MODELS_DIR}/product_df.pkl",    "rb") as f: state.product_df    = pickle.load(f)
-        with open(f"{MODELS_DIR}/tfidf_matrix.pkl",  "rb") as f: state.tfidf_matrix  = pickle.load(f)
-        with open(f"{MODELS_DIR}/product_index.pkl", "rb") as f: state.product_index = pickle.load(f)
-
-        logger.info("✓ Models loaded from disk — startup complete")
-
-    else:
-        # ── Slow path: build from DB (first time only) ────────────────────────
-        logger.warning("⚠️  No saved models found — building from DB (this will take a few minutes) ...")
-        logger.warning("    Run 'python save_models.py' next time to avoid this.")
-
-        state.matrix, state.sim_matrix                              = load_model(state.engine)
-        state.product_df, state.tfidf_matrix, state.product_index, _ = load_content_model(state.engine)
-
-        logger.info("✓ Models built and ready")
-
     yield
-
-    # Shutdown
     logger.info("Shutting down — disposing DB engine ...")
     state.engine.dispose()
 
@@ -115,7 +117,8 @@ app = FastAPI(
 
 def validate_user(user_id: int):
     """Raise 404 if user doesn't exist in the rating matrix."""
-    if user_id not in state.matrix.index:
+    matrix = get_matrix()
+    if user_id not in matrix.index:
         raise HTTPException(
             status_code=404,
             detail=f"User {user_id} not found in the rating matrix."
@@ -126,32 +129,15 @@ def validate_user(user_id: int):
 
 @app.get("/health", tags=["Status"])
 def health_check():
-    """Check if the API and both models are live."""
+    """Check if the API is live."""
     return {
-        "status"          : "ok",
-        "models_from_disk": models_exist(),
-        "users_loaded"    : int(state.matrix.shape[0])    if state.matrix       is not None else 0,
-        "products_loaded" : int(state.matrix.shape[1])    if state.matrix       is not None else 0,
-        "cf_model"        : state.sim_matrix              is not None,
-        "content_model"   : state.tfidf_matrix            is not None,
+        "status": "ok",
+        "engine_live": state.engine is not None,
+        "memory_optimized": True
     }
 
 
-# ── Endpoint 1: Sample Users ──────────────────────────────────────────────────
-
-@app.get("/users/sample", tags=["Status"])
-def sample_users(
-    n: int = Query(default=10, ge=1, le=100, description="Number of sample user IDs to return")
-):
-    """Returns a sample of user IDs from the matrix — useful for picking test users."""
-    sample = state.matrix.index[:n].tolist()
-    return {
-        "sample_user_ids": sample,
-        "total_users"    : len(state.matrix)
-    }
-
-
-# ── Endpoint 2: Collaborative Filtering ──────────────────────────────────────
+# ── Endpoint 1: Collaborative Filtering ──────────────────────────────────────
 
 @app.get("/recommend/collaborative/{user_id}", tags=["Collaborative Filtering"])
 def collaborative_recommendations(
@@ -159,35 +145,19 @@ def collaborative_recommendations(
     top_n   : int  = Query(default=10, ge=1, le=50,  description="Number of recommendations to return"),
     enrich  : bool = Query(default=True,              description="Include full product details"),
 ):
-    """
-    Get recommendations using **Collaborative Filtering**.
-
-    - Finds the most similar users based on rating patterns
-    - Recommends products those users rated highly that this user hasn't seen
-    """
     validate_user(user_id)
-
-    start  = time.time()
-    rec_df = get_recommendations(user_id, state.matrix, state.sim_matrix, top_n=top_n)
-
+    rec_df = get_recommendations(user_id, get_matrix(), get_sim_matrix(), top_n=top_n)
     if rec_df.empty:
         return JSONResponse(content={"user_id": user_id, "recommendations": [], "count": 0})
-
     if enrich:
         rec_df = enrich_with_product_details(rec_df, state.engine)
-
-    elapsed = round(time.time() - start, 3)
-
     return {
-        "user_id"        : user_id,
-        "method"         : "collaborative_filtering",
-        "count"          : len(rec_df),
-        "response_time_s": elapsed,
+        "user_id": user_id,
         "recommendations": rec_df.to_dict(orient="records"),
     }
 
 
-# ── Endpoint 3: Content-Based Filtering ──────────────────────────────────────
+# ── Endpoint 2: Content-Based Filtering ──────────────────────────────────────
 
 @app.get("/recommend/content/{user_id}", tags=["Content-Based Filtering"])
 def content_recommendations(
@@ -196,270 +166,105 @@ def content_recommendations(
     top_rated_n : int  = Query(default=5,  ge=1, le=20, description="User's top-rated products to use as taste seeds"),
     enrich      : bool = Query(default=True,             description="Include full product details"),
 ):
-    """
-    Get recommendations using **Content-Based Filtering** (TF-IDF cosine similarity).
-
-    - Builds a taste profile from the user's highest-rated products
-    - Finds unseen products most similar to that taste profile
-    """
     validate_user(user_id)
-
-    start  = time.time()
     rec_df = get_content_recommendations(
-        user_id,
-        state.matrix,
-        state.tfidf_matrix,
-        state.product_index,
-        top_n=top_n,
-        top_rated_n=top_rated_n,
+        user_id, get_matrix(), get_tfidf_matrix(), get_product_index(), top_n=top_n, top_rated_n=top_rated_n
     )
-
     if rec_df.empty:
         return JSONResponse(content={"user_id": user_id, "recommendations": [], "count": 0})
-
     if enrich:
         rec_df = enrich_with_product_details(rec_df, state.engine)
-
-    elapsed = round(time.time() - start, 3)
-
     return {
-        "user_id"        : user_id,
-        "method"         : "content_based_filtering",
-        "count"          : len(rec_df),
-        "response_time_s": elapsed,
+        "user_id": user_id,
         "recommendations": rec_df.to_dict(orient="records"),
     }
 
 
-# ── Endpoint 4: Compare Both Side-by-Side ────────────────────────────────────
-
-@app.get("/recommend/compare/{user_id}", tags=["Compare"])
-def compare_recommendations(
-    user_id : int,
-    top_n   : int = Query(default=10, ge=1, le=50, description="Number of recommendations from each method"),
-):
-    """
-    Run **both engines** for the same user and return results side-by-side.
-    Useful for directly comparing what each method recommends.
-    """
-    validate_user(user_id)
-
-    start = time.time()
-
-    cf_df = get_recommendations(user_id, state.matrix, state.sim_matrix, top_n=top_n)
-    cb_df = get_content_recommendations(
-        user_id, state.matrix, state.tfidf_matrix, state.product_index, top_n=top_n
-    )
-
-    if not cf_df.empty:
-        cf_df = enrich_with_product_details(cf_df, state.engine)
-    if not cb_df.empty:
-        cb_df = enrich_with_product_details(cb_df, state.engine)
-
-    cf_ids      = set(cf_df["product_id"]) if not cf_df.empty else set()
-    cb_ids      = set(cb_df["product_id"]) if not cb_df.empty else set()
-    overlap_ids = cf_ids & cb_ids
-
-    elapsed = round(time.time() - start, 3)
-
-    return {
-        "user_id"                : user_id,
-        "response_time_s"        : elapsed,
-        "overlap_count"          : len(overlap_ids),
-        "overlap_product_ids"    : list(overlap_ids),
-        "collaborative_filtering": cf_df.to_dict(orient="records") if not cf_df.empty else [],
-        "content_based_filtering": cb_df.to_dict(orient="records") if not cb_df.empty else [],
-    }
-
-
-# ── Endpoint 5: Search ────────────────────────────────────────────────────────
+# ── Endpoint 3: Search ────────────────────────────────────────────────────────
 
 @app.get("/search", tags=["Search"])
 def search_products(
-    q          : str   = Query(..., min_length=1,               description="Search term e.g. 'shoes', 'laptop'"),
-    top_n      : int   = Query(default=10, ge=1,     le=50,     description="Number of results to return"),
-    min_rating : float = Query(default=0.0, ge=0.0,  le=5.0,    description="Minimum average rating filter"),
+    q          : str   = Query(..., min_length=1),
+    top_n      : int   = Query(default=10, ge=1, le=50),
+    min_rating : float = Query(default=0.0, ge=0.0, le=5.0),
 ):
-    """
-    Search products by title from the database.
-    Results sorted by highest rating first, then by review count.
-    """
     try:
         from sqlalchemy import text
-
-        query = """
-            SELECT
-                asin,
-                title,
-                stars,
-                reviews,
-                price,
-                img_url,
-                category_id
-            FROM amazon_products
-            WHERE title LIKE :search_term
-              AND stars >= :min_rating
-            ORDER BY stars DESC, reviews DESC
-            LIMIT :top_n
-        """
-
+        query = "SELECT asin, title, stars, reviews, price, img_url AS imgUrl FROM amazon_products WHERE title LIKE :q AND stars >= :r ORDER BY stars DESC LIMIT :n"
         with state.engine.connect() as conn:
-            rows = conn.execute(text(query), {
-                "search_term": f"%{q}%",
-                "min_rating" : min_rating,
-                "top_n"      : top_n,
-            }).fetchall()
-
-        if not rows:
-            return {
-                "query"  : q,
-                "count"  : 0,
-                "results": [],
-                "message": f"No products found for '{q}'"
-            }
-
-        results = [
-            {
-                "asin"         : row.asin,
-                "title"        : row.title,
-                "stars"        : row.stars,
-                "reviews"      : row.reviews,
-                "price"        : row.price,
-                "imgUrl"       : row.img_url,
-                "category_id"  : row.category_id,
-            }
-            for row in rows
-        ]
-
-        return {
-            "query"  : q,
-            "count"  : len(results),
-            "results": results,
-            "items"  : results,  # Double-compatibility for search
-        }
-
+            rows = conn.execute(text(query), {"q": f"%{q}%", "r": min_rating, "n": top_n}).fetchall()
+        return {"items": [dict(r._mapping) for r in rows]}
     except Exception as e:
         logger.error(f"Search error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# ── Endpoint 6: Homepage Paginated Products ───────────────────────────────────
+# ── Endpoint 4: Homepage Paginated Products ───────────────────────────────────
 
 @app.get("/products", tags=["Compatibility"])
+@app.get("/products/homepage", tags=["Compatibility"])
 def get_products_compat(
     page: int = Query(1, ge=1),
     size: int = Query(20, ge=1, le=100),
     search: str = Query(None)
 ):
-    """Adapter for HomePage.jsx: res.data.items and res.data.pages."""
     try:
         from sqlalchemy import text
         offset = (page - 1) * size
-        
-        # Base query
         where_clause = "WHERE title IS NOT NULL"
         params = {"limit": size, "offset": offset}
-        
         if search:
             where_clause += " AND title LIKE :search"
             params["search"] = f"%{search}%"
             
-        # Get Items
-        query = f"""
-            SELECT asin, title, stars, reviews, price, img_url AS imgUrl 
-            FROM amazon_products 
-            {where_clause}
-            LIMIT :limit OFFSET :offset
-        """
-        
-        # Get count for pages
+        # Optimization: Remove COUNT(*) if possible, but keeping it for pagination
+        query = f"SELECT asin, title, stars, reviews, price, img_url AS imgUrl FROM amazon_products {where_clause} LIMIT :limit OFFSET :offset"
         count_query = f"SELECT COUNT(*) FROM amazon_products {where_clause}"
         
         with state.engine.connect() as conn:
             rows = conn.execute(text(query), params).fetchall()
+            # Fast-path for count if it's the first page
             total_count = conn.execute(text(count_query), params).scalar()
             
-        items = [dict(r._mapping) for r in rows]
-        pages = (total_count + size - 1) // size
-        
-        return {"items": items, "pages": pages}
+        return {"items": [dict(r._mapping) for r in rows], "pages": (total_count + size - 1) // size}
     except Exception as e:
-        logger.error(f"Products compat error: {e}")
+        logger.error(f"Products error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/products/{asin}", tags=["Compatibility"])
 def get_product_detail_compat(asin: str):
-    """Adapter for ProductDetailPage.jsx: Direct product object."""
     try:
         from sqlalchemy import text
-        query = "SELECT asin, title, stars, reviews, price, img_url AS imgUrl, video_url, category_id, listPrice, boughtInLastMonth, isBestSeller FROM amazon_products WHERE asin = :asin"
+        query = "SELECT asin, title, stars, reviews, price, img_url AS imgUrl, video_url FROM amazon_products WHERE asin = :asin"
         with state.engine.connect() as conn:
             row = conn.execute(text(query), {"asin": asin}).fetchone()
-        
-        if not row:
-            raise HTTPException(status_code=404, detail="Product not found")
-            
+        if not row: raise HTTPException(status_code=404)
         return dict(row._mapping)
-    except HTTPException: raise
     except Exception as e:
-        logger.error(f"Product detail error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/products/{asin}/similar", tags=["Compatibility"])
 def get_similar_products_compat(asin: str):
-    """Adapter for ProductDetailPage.jsx: List of {similar_product: {...}}."""
     try:
-        if state.tfidf_matrix is None:
-            return []
-            
-        rec_df = get_item_similarity(asin, state.tfidf_matrix, state.product_index, top_n=6)
-        if rec_df.empty:
-            return []
-            
+        rec_df = get_item_similarity(asin, get_tfidf_matrix(), get_product_index(), top_n=6)
+        if rec_df.empty: return []
         enriched = enrich_with_product_details(rec_df, state.engine)
-        return [
-            {
-                "similar_product_id": row.product_id,
-                "similar_product": {
-                    "asin":    row.asin if hasattr(row, 'asin') else row.product_id,
-                    "title":   row.title if hasattr(row, 'title') else row.product_name,
-                    "stars":   row.stars if hasattr(row, 'stars') else row.avg_rating,
-                    "reviews": row.reviews if hasattr(row, 'reviews') else row.total_reviews,
-                    "price":   row.price,
-                    "imgUrl":  row.imgUrl if hasattr(row, 'imgUrl') else row.img_url
-                }
-            }
-            for row in enriched.itertuples()
-        ]
+        return [{"similar_product": dict(row._mapping)} for row in enriched.itertuples()]
     except Exception as e:
-        logger.error(f"Similar compat error: {e}")
         return []
 
 
 @app.get("/users/{user_id}/recommendations", tags=["Compatibility"])
 def get_user_recommendations_compat(user_id: int):
-    """Adapter for ProfilePage.jsx: List of {product: {...}}."""
     try:
-        # Simple combined rec strategy
-        cf_df = get_recommendations(user_id, state.matrix, state.sim_matrix, top_n=5)
-        cb_df = get_content_recommendations(user_id, state.matrix, state.tfidf_matrix, state.product_index, top_n=5)
-        
-        pids = []
-        if not cf_df.empty: pids.extend(cf_df["product_id"].tolist())
-        if not cb_df.empty: pids.extend(cb_df["product_id"].tolist())
-        
-        if not pids: return []
-        
-        # Enrich unique ones
-        unique_pids = list(set(pids))
+        cf_df = get_recommendations(user_id, get_matrix(), get_sim_matrix(), top_n=5)
+        if cf_df.empty: return []
         from sqlalchemy import text
         query = "SELECT asin, title, stars, reviews, price, img_url AS imgUrl FROM amazon_products WHERE asin IN :ids"
         with state.engine.connect() as conn:
-            rows = conn.execute(text(query), {"ids": tuple(unique_pids)}).fetchall()
-            
-        return [{"product_id": r.asin, "product": dict(r._mapping)} for r in rows]
+            rows = conn.execute(text(query), {"ids": tuple(cf_df["product_id"].tolist())}).fetchall()
+        return [{"product": dict(r._mapping)} for r in rows]
     except Exception as e:
-        logger.error(f"Recs compat error: {e}")
         return []
