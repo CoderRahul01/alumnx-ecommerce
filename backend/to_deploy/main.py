@@ -289,11 +289,12 @@ def search_products(
 
         query = """
             SELECT
-                asin        AS product_id,
-                title       AS product_name,
-                stars       AS avg_rating,
-                reviews     AS total_reviews,
+                asin,
+                title,
+                stars,
+                reviews,
                 price,
+                img_url,
                 category_id
             FROM amazon_products
             WHERE title LIKE :search_term
@@ -319,12 +320,12 @@ def search_products(
 
         results = [
             {
-                "asin"         : row.asin if hasattr(row, 'asin') else row.product_id,
-                "title"        : row.title if hasattr(row, 'title') else row.product_name,
-                "stars"        : row.stars if hasattr(row, 'stars') else row.avg_rating,
-                "reviews"      : row.reviews if hasattr(row, 'reviews') else row.total_reviews,
+                "asin"         : row.asin,
+                "title"        : row.title,
+                "stars"        : row.stars,
+                "reviews"      : row.reviews,
                 "price"        : row.price,
-                "imgUrl"       : row.img_url if hasattr(row, 'img_url') else None,
+                "imgUrl"       : row.img_url,
                 "category_id"  : row.category_id,
             }
             for row in rows
@@ -422,12 +423,12 @@ def get_similar_products_compat(asin: str):
             {
                 "similar_product_id": row.product_id,
                 "similar_product": {
-                    "asin":    row.product_id,
-                    "title":   row.product_name,
-                    "stars":   row.avg_rating,
-                    "reviews": row.total_reviews,
+                    "asin":    row.asin if hasattr(row, 'asin') else row.product_id,
+                    "title":   row.title if hasattr(row, 'title') else row.product_name,
+                    "stars":   row.stars if hasattr(row, 'stars') else row.avg_rating,
+                    "reviews": row.reviews if hasattr(row, 'reviews') else row.total_reviews,
                     "price":   row.price,
-                    "imgUrl":  row.img_url
+                    "imgUrl":  row.imgUrl if hasattr(row, 'imgUrl') else row.img_url
                 }
             }
             for row in enriched.itertuples()

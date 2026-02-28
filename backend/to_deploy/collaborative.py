@@ -179,9 +179,9 @@ def enrich_with_product_details(rec_df: pd.DataFrame, engine) -> pd.DataFrame:
         return rec_df
     pids       = ", ".join([f"'{p}'" for p in rec_df["product_id"].tolist()])
     details_df = pd.read_sql(f"""
-        SELECT asin AS product_id, title AS product_name,
-               stars AS avg_rating, reviews AS total_reviews,
-               price, category_id
+        SELECT asin, asin AS product_id, title, title AS product_name,
+               stars, stars AS avg_rating, reviews, reviews AS total_reviews,
+               price, img_url, img_url AS imgUrl, category_id
         FROM amazon_products WHERE asin IN ({pids})
     """, engine)
     return rec_df.merge(details_df, on="product_id", how="left")
