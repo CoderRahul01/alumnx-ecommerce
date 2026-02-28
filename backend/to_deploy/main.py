@@ -211,20 +211,27 @@ def get_products_compat(
     try:
         from sqlalchemy import text
         offset = (page - 1) * size
-        where_clause = "WHERE title IS NOT NULL"
-        params = {"limit": size, "offset": offset}
-        if search:
-            where_clause += " AND title LIKE :search"
-            params["search"] = f"%{search}%"
-            
-        # Optimization: Remove COUNT(*) if possible, but keeping it for pagination
-        query = f"SELECT asin, title, stars, reviews, price, img_url AS imgUrl FROM amazon_products {where_clause} LIMIT :limit OFFSET :offset"
-        count_query = f"SELECT COUNT(*) FROM amazon_products {where_clause}"
         
-        with state.engine.connect() as conn:
-            rows = conn.execute(text(query), params).fetchall()
-            # Fast-path for count if it's the first page
-            total_count = conn.execute(text(count_query), params).scalar()
+        if search:
+            # If searching, we MUST do a real COUNT(*) for accuracy
+            where_clause = "WHERE title LIKE :search"
+            params = {"limit": size, "offset": offset, "search": f"%{search}%"}
+            query = f"SELECT asin, title, stars, reviews, price, img_url AS imgUrl FROM amazon_products {where_clause} LIMIT :limit OFFSET :offset"
+            count_query = f"SELECT COUNT(*) FROM amazon_products {where_clause}"
+            
+            with state.engine.connect() as conn:
+                rows = conn.execute(text(query), params).fetchall()
+                total_count = conn.execute(text(count_query), params).scalar()
+        else:
+            # 🚀 HIGHLY OPTIMIZED PATH for homepage
+            # Use estimated row count from information_schema (FAST)
+            params = {"limit": size, "offset": offset}
+            query = "SELECT asin, title, stars, reviews, price, img_url AS imgUrl FROM amazon_products LIMIT :limit OFFSET :offset"
+            est_count_query = "SELECT TABLE_ROWS FROM information_schema.tables WHERE TABLE_NAME = 'amazon_products' AND TABLE_SCHEMA = 'cohort_main'"
+            
+            with state.engine.connect() as conn:
+                rows = conn.execute(text(query), params).fetchall()
+                total_count = conn.execute(text(est_count_query)).scalar() or 1400000
             
         return {"items": [dict(r._mapping) for r in rows], "pages": (total_count + size - 1) // size}
     except Exception as e:
